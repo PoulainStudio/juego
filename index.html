@@ -1,0 +1,438 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Medusa Milanesa Adventure</title>
+    <style>
+        body { margin: 0; background: #222; color: white; font-family: sans-serif; overflow: hidden; display: flex; flex-direction: column; align-items: center; }
+        canvas { background: #333; border: 4px solid #f39c12; display: block; margin-top: 20px; touch-action: none; }
+        .info { text-align: center; margin-top: 10px; max-width: 420px; line-height: 1.4; }
+        h1 { color: #f39c12; margin-bottom: 5px; }
+        .actions { margin-top: 10px; display: flex; gap: 10px; align-items: center; flex-wrap: wrap; justify-content: center; }
+        select {
+            background: #fff8e8;
+            color: #111;
+            border: 2px solid #f39c12;
+            border-radius: 8px;
+            padding: 8px 10px;
+            font-weight: bold;
+        }
+        button {
+            background: #f39c12;
+            color: #111;
+            border: none;
+            border-radius: 8px;
+            padding: 10px 16px;
+            font-weight: bold;
+            cursor: pointer;
+        }
+        button:hover { filter: brightness(1.05); }
+    </style>
+</head>
+<body>
+    <h1>Medusa vs El Encarecimiento</h1>
+    <div class="info">Usá las <b>flechas</b> o <b>tocá la pantalla</b> para moverte. <br> ¡Atrapá milanesas, esquivá papeles!<br>Power-ups: <b>🛡️</b> escudo y <b>🧲</b> imán. Pausa con <b>P</b>.</div>
+    <div class="actions">
+        <button id="startButton">Jugar</button>
+        <button id="pauseButton">Pausa</button>
+        <select id="difficultySelect" aria-label="Dificultad">
+            <option value="easy">Facil</option>
+            <option value="normal" selected>Normal</option>
+            <option value="hard">Dificil</option>
+        </select>
+    </div>
+    <canvas id="gameCanvas"></canvas>
+
+    <script>
+        const canvas = document.getElementById("gameCanvas");
+        const ctx = canvas.getContext("2d");
+
+        canvas.width = window.innerWidth > 500 ? 400 : window.innerWidth - 20;
+        canvas.height = 500;
+
+        let score = 0;
+        let bestScore = Number(localStorage.getItem("medusaBestScore") || 0);
+        let gameOver = false;
+        let gameStarted = false;
+        let paused = false;
+        let level = 1;
+
+        const player = {
+            x: canvas.width / 2 - 25,
+            y: canvas.height - 70,
+            w: 50,
+            h: 50,
+            speed: 7,
+            emoji: "🍝" // Medusa de espagueti
+        };
+
+        let items = [];
+        const types = [
+            { emoji: "🥩", type: "good" },
+            { emoji: "📄", type: "bad" },
+            { emoji: "🛡️", type: "shield" },
+            { emoji: "🧲", type: "magnet" }
+        ];
+
+        const startButton = document.getElementById("startButton");
+        const pauseButton = document.getElementById("pauseButton");
+        const difficultySelect = document.getElementById("difficultySelect");
+
+        const powerUpState = {
+            shieldUntil: 0,
+            magnetUntil: 0
+        };
+
+        const difficultyPresets = {
+            easy: { spawnEveryFrames: 48, minSpawnEveryFrames: 22, speedBoostStep: 0.18, basePlayerSpeed: 8 },
+            normal: { spawnEveryFrames: 40, minSpawnEveryFrames: 15, speedBoostStep: 0.25, basePlayerSpeed: 7 },
+            hard: { spawnEveryFrames: 32, minSpawnEveryFrames: 12, speedBoostStep: 0.35, basePlayerSpeed: 6.6 }
+        };
+
+        let currentDifficulty = "normal";
+
+        const difficulty = {
+            spawnEveryFrames: 40,
+            minSpawnEveryFrames: 15,
+            speedBoost: 0,
+            speedBoostStep: 0.25,
+            frameCounter: 0
+        };
+
+        function applyDifficulty(mode) {
+            const preset = difficultyPresets[mode] || difficultyPresets.normal;
+            currentDifficulty = mode;
+            difficulty.spawnEveryFrames = preset.spawnEveryFrames;
+            difficulty.minSpawnEveryFrames = preset.minSpawnEveryFrames;
+            difficulty.speedBoostStep = preset.speedBoostStep;
+            player.speed = preset.basePlayerSpeed;
+        }
+
+        function clampPlayer() {
+            player.x = Math.max(0, Math.min(player.x, canvas.width - player.w));
+        }
+
+        function playTone(freq, duration, type = "sine", volume = 0.07) {
+            const AudioCtx = window.AudioContext || window.webkitAudioContext;
+            if (!AudioCtx) return;
+
+            if (!playTone.ctx) {
+                playTone.ctx = new AudioCtx();
+            }
+
+            const audioCtx = playTone.ctx;
+            if (audioCtx.state === "suspended") {
+                audioCtx.resume();
+            }
+
+            const oscillator = audioCtx.createOscillator();
+            const gain = audioCtx.createGain();
+            oscillator.type = type;
+            oscillator.frequency.value = freq;
+            gain.gain.value = volume;
+
+            oscillator.connect(gain);
+            gain.connect(audioCtx.destination);
+
+            oscillator.start();
+            gain.gain.exponentialRampToValueAtTime(0.0001, audioCtx.currentTime + duration);
+            oscillator.stop(audioCtx.currentTime + duration);
+        }
+
+        function soundPoint() {
+            playTone(760, 0.08, "triangle", 0.06);
+        }
+
+        function soundGameOver() {
+            playTone(220, 0.15, "square", 0.08);
+            setTimeout(() => playTone(140, 0.2, "square", 0.07), 120);
+        }
+
+        function soundPowerUp() {
+            playTone(960, 0.08, "sine", 0.06);
+            setTimeout(() => playTone(1240, 0.08, "sine", 0.05), 90);
+        }
+
+        function resetGame() {
+            score = 0;
+            gameOver = false;
+            paused = false;
+            level = 1;
+            items = [];
+            frame = 0;
+            applyDifficulty(difficultySelect.value);
+            difficulty.speedBoost = 0;
+            difficulty.frameCounter = 0;
+            powerUpState.shieldUntil = 0;
+            powerUpState.magnetUntil = 0;
+            player.x = canvas.width / 2 - player.w / 2;
+            clampPlayer();
+            gameStarted = true;
+            startButton.textContent = "Reiniciar";
+            pauseButton.textContent = "Pausa";
+        }
+
+        function spawnItem() {
+            const powerRoll = Math.random();
+            let type;
+
+            if (powerRoll < 0.07) {
+                type = types[2];
+            } else if (powerRoll < 0.14) {
+                type = types[3];
+            } else {
+                type = Math.random() > 0.3 ? types[0] : types[1];
+            }
+
+            items.push({
+                x: Math.random() * (canvas.width - 30),
+                y: -30,
+                speed: 2 + Math.random() * 3 + difficulty.speedBoost,
+                ...type
+            });
+        }
+
+        function isShieldActive() {
+            return performance.now() < powerUpState.shieldUntil;
+        }
+
+        function isMagnetActive() {
+            return performance.now() < powerUpState.magnetUntil;
+        }
+
+        function drawBackground() {
+            const gradients = [
+                ["#1f2937", "#0b1020"],
+                ["#114b5f", "#1a936f"],
+                ["#5b2c6f", "#1f1c2c"],
+                ["#7f1d1d", "#3f0d12"]
+            ];
+            const selected = gradients[Math.min(level - 1, gradients.length - 1)];
+            const grad = ctx.createLinearGradient(0, 0, 0, canvas.height);
+            grad.addColorStop(0, selected[0]);
+            grad.addColorStop(1, selected[1]);
+
+            ctx.fillStyle = grad;
+            ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+            ctx.fillStyle = "rgba(255,255,255,0.06)";
+            for (let i = 0; i < 5; i++) {
+                const x = ((frame * (0.5 + i * 0.12)) + i * 80) % (canvas.width + 60) - 30;
+                const y = 60 + i * 85;
+                ctx.beginPath();
+                ctx.arc(x, y, 22, 0, Math.PI * 2);
+                ctx.fill();
+            }
+        }
+
+        function togglePause() {
+            if (!gameStarted || gameOver) return;
+            paused = !paused;
+            pauseButton.textContent = paused ? "Reanudar" : "Pausa";
+        }
+
+        let frame = 0;
+        function update() {
+            if (!gameStarted || gameOver || paused) return;
+
+            frame++;
+            difficulty.frameCounter++;
+
+            if (score >= 300) level = 4;
+            else if (score >= 200) level = 3;
+            else if (score >= 100) level = 2;
+            else level = 1;
+
+            // Dificultad progresiva: aparecen mas items y caen mas rapido con el tiempo.
+            if (difficulty.frameCounter % 300 === 0) {
+                difficulty.spawnEveryFrames = Math.max(difficulty.minSpawnEveryFrames, difficulty.spawnEveryFrames - 2);
+                difficulty.speedBoost = Math.min(4, difficulty.speedBoost + difficulty.speedBoostStep);
+            }
+
+            if (frame % difficulty.spawnEveryFrames === 0) spawnItem();
+
+            for (let index = items.length - 1; index >= 0; index--) {
+                const item = items[index];
+
+                if (isMagnetActive() && item.type === "good") {
+                    const targetX = player.x + player.w / 2 - 15;
+                    item.x += (targetX - item.x) * 0.045;
+                }
+
+                item.y += item.speed;
+
+                // Colisión
+                if (item.y + 30 > player.y && item.x < player.x + player.w && item.x + 30 > player.x) {
+                    if (item.type === "good") {
+                        score += 10;
+                        soundPoint();
+                        items.splice(index, 1);
+                    } else if (item.type === "shield") {
+                        powerUpState.shieldUntil = performance.now() + 7000;
+                        soundPowerUp();
+                        items.splice(index, 1);
+                    } else if (item.type === "magnet") {
+                        powerUpState.magnetUntil = performance.now() + 7000;
+                        soundPowerUp();
+                        items.splice(index, 1);
+                    } else if (isShieldActive()) {
+                        powerUpState.shieldUntil = 0;
+                        items.splice(index, 1);
+                    } else {
+                        gameOver = true;
+                        if (score > bestScore) {
+                            bestScore = score;
+                            localStorage.setItem("medusaBestScore", String(bestScore));
+                        }
+                        soundGameOver();
+                    }
+                }
+
+                if (item.y > canvas.height) items.splice(index, 1);
+            }
+        }
+
+        function draw() {
+            drawBackground();
+
+            // Dibujar Medusa
+            ctx.font = "40px serif";
+            ctx.fillText(player.emoji, player.x, player.y + 40);
+
+            if (isShieldActive()) {
+                ctx.strokeStyle = "#8ce99a";
+                ctx.lineWidth = 3;
+                ctx.beginPath();
+                ctx.arc(player.x + player.w / 2, player.y + 20, 30, 0, Math.PI * 2);
+                ctx.stroke();
+            }
+
+            // Dibujar Items
+            items.forEach(item => {
+                ctx.fillText(item.emoji, item.x, item.y);
+            });
+
+            // Score
+            ctx.fillStyle = "white";
+            ctx.font = "20px Arial";
+            ctx.fillText(`Puntos: ${score}`, 10, 30);
+            ctx.fillText(`Record: ${bestScore}`, 10, 56);
+            ctx.fillText(`Nivel: ${level}`, 10, 82);
+            ctx.fillText(`Dificultad: ${difficultySelect.value}`, 10, 108);
+
+            if (isMagnetActive()) {
+                const remain = Math.ceil((powerUpState.magnetUntil - performance.now()) / 1000);
+                ctx.fillText(`Iman: ${Math.max(0, remain)}s`, 10, 134);
+            }
+
+            if (isShieldActive()) {
+                const remain = Math.ceil((powerUpState.shieldUntil - performance.now()) / 1000);
+                ctx.fillText(`Escudo: ${Math.max(0, remain)}s`, 10, 160);
+            }
+
+            if (!gameStarted) {
+                ctx.fillStyle = "rgba(0,0,0,0.65)";
+                ctx.fillRect(0, 0, canvas.width, canvas.height);
+                ctx.fillStyle = "#f39c12";
+                ctx.font = "36px Arial";
+                ctx.textAlign = "center";
+                ctx.fillText("Medusa", canvas.width / 2, canvas.height / 2 - 30);
+                ctx.fillStyle = "white";
+                ctx.font = "20px Arial";
+                ctx.fillText("Toca Jugar para empezar", canvas.width / 2, canvas.height / 2 + 10);
+                ctx.fillText(`Record actual: ${bestScore}`, canvas.width / 2, canvas.height / 2 + 45);
+            }
+
+            if (paused && !gameOver) {
+                ctx.fillStyle = "rgba(0,0,0,0.65)";
+                ctx.fillRect(0, 0, canvas.width, canvas.height);
+                ctx.fillStyle = "#f8d06a";
+                ctx.textAlign = "center";
+                ctx.font = "40px Arial";
+                ctx.fillText("PAUSA", canvas.width / 2, canvas.height / 2 - 10);
+                ctx.fillStyle = "white";
+                ctx.font = "20px Arial";
+                ctx.fillText("P o boton para continuar", canvas.width / 2, canvas.height / 2 + 28);
+            }
+
+            if (gameOver) {
+                ctx.fillStyle = "rgba(0,0,0,0.7)";
+                ctx.fillRect(0, 0, canvas.width, canvas.height);
+                ctx.fillStyle = "red";
+                ctx.font = "40px Arial";
+                ctx.textAlign = "center";
+                ctx.fillText("¡TE ENCARECISTE!", canvas.width / 2, canvas.height / 2);
+                ctx.fillStyle = "white";
+                ctx.font = "20px Arial";
+                ctx.fillText("Toca pantalla o R para reintentar", canvas.width / 2, canvas.height / 2 + 40);
+            }
+
+            ctx.textAlign = "start";
+        }
+
+        // Controles
+        window.addEventListener("keydown", (e) => {
+            if ((e.key === "r" || e.key === "R") && gameStarted) {
+                resetGame();
+                return;
+            }
+            if ((e.key === "Enter" || e.key === " ") && !gameStarted) {
+                resetGame();
+                return;
+            }
+            if (e.key === "p" || e.key === "P") {
+                togglePause();
+                return;
+            }
+            if (!gameStarted || gameOver || paused) return;
+            if (e.key === "ArrowLeft") player.x -= player.speed * 2;
+            if (e.key === "ArrowRight") player.x += player.speed * 2;
+            clampPlayer();
+        });
+
+        // Touch para celular
+        canvas.addEventListener("touchmove", (e) => {
+            if (!gameStarted || gameOver || paused) return;
+            const touchX = e.touches[0].clientX - canvas.offsetLeft;
+            player.x = touchX - player.w / 2;
+            clampPlayer();
+            e.preventDefault();
+        }, {passive: false});
+
+        canvas.addEventListener("click", () => {
+            if (!gameStarted || gameOver) {
+                resetGame();
+            }
+        });
+
+        startButton.addEventListener("click", () => {
+            resetGame();
+        });
+
+        pauseButton.addEventListener("click", () => {
+            togglePause();
+        });
+
+        difficultySelect.addEventListener("change", () => {
+            if (gameStarted && !gameOver) {
+                applyDifficulty(difficultySelect.value);
+            }
+        });
+
+        window.addEventListener("resize", () => {
+            canvas.width = window.innerWidth > 500 ? 400 : window.innerWidth - 20;
+            clampPlayer();
+        });
+
+        function loop() {
+            update();
+            draw();
+            requestAnimationFrame(loop);
+        }
+
+        applyDifficulty(difficultySelect.value);
+        loop();
+    </script>
+</body>
+</html>
